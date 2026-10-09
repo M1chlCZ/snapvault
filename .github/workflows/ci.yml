@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check shell syntax
+        run: |
+          bash -n snapvault.sh
+          bash -n snapvault-verify.sh
+          bash -n test/snapvault.test.sh
+      - name: Run the test suite
+        run: bash test/snapvault.test.sh
