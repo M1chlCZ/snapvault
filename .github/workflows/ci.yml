@@ -19,6 +19,7 @@ jobs:
         run: |
           bash -n snapvault.sh
           bash -n snapvault-verify.sh
+          bash -n snapvault-restore.sh
           bash -n test/snapvault.test.sh
       - name: Run the test suite
         run: bash test/snapvault.test.sh

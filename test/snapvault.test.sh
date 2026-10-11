@@ -5,6 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 backup_script="$repo_root/snapvault.sh"
 verify_script="$repo_root/snapvault-verify.sh"
+restore_script="$repo_root/snapvault-restore.sh"
 test_root=$(mktemp -d)
 test_root=$(CDPATH= cd -- "$test_root" && pwd -P)
 trap 'rm -rf -- "$test_root"' EXIT
@@ -102,6 +103,16 @@ test -n "$output"
 printf 'database dump\n' >"$output"
 EOF
 chmod +x "$fake_bin/pg_dump"
+
+cat >"$fake_bin/pg_restore" <<'EOF'
+#!/bin/sh
+set -eu
+test "${PGDATABASE:-}" = "postgres://restore-test"
+test "${FAKE_PG_RESTORE_FAIL:-0}" != "1" || exit 43
+test "$#" -eq 1
+printf '%s\n%s\n' "$PGDATABASE" "$1" >"${FAKE_PG_RESTORE_LOG:?}"
+EOF
+chmod +x "$fake_bin/pg_restore"
 
 run_backup() {
   SNAPVAULT_BACKUP_DESTINATION="$destination" \
@@ -215,4 +226,102 @@ expect_failure env \
   SNAPVAULT_TIMESTAMP=20260829T120500Z \
   "$backup_script"
 
-printf 'PASS: database and media snapshots are complete, verified and safely retained\n'
+restore_source=$(run_backup 20260829T130000Z)
+restored_media="$test_root/restored-media"
+restore_output=$("$restore_script" "$restore_source" "$restored_media")
+printf '%s\n' "$restore_output" | grep -q "^restored_media=$restored_media$" ||
+  fail "restore did not report restored_media"
+printf '%s\n' "$restore_output" | grep -q '^restored_database=skipped$' ||
+  fail "restore without --database did not report restored_database=skipped"
+cmp "$media_root/media-sources/source.webp" "$restored_media/media-sources/source.webp" ||
+  fail "restored source media differs from the original"
+cmp "$media_root/media-derivatives/derived.avif" "$restored_media/media-derivatives/derived.avif" ||
+  fail "restored derived media differs from the original"
+(cd "$restored_media" && hash_command -c "$restore_source/media-index.sha256") >/dev/null ||
+  fail "restored media does not match the media index"
+
+occupied_target="$test_root/occupied-restore-target"
+mkdir "$occupied_target"
+printf 'stale\n' >"$occupied_target/stale.txt"
+expect_failure "$restore_script" "$restore_source" "$occupied_target"
+test ! -e "$occupied_target/media-sources/source.webp" ||
+  fail "refused restore extracted media into a non-empty target"
+"$restore_script" "$restore_source" "$occupied_target" --force >/dev/null
+cmp "$media_root/media-sources/source.webp" "$occupied_target/media-sources/source.webp" ||
+  fail "--force restore did not extract the media"
+test -f "$occupied_target/stale.txt" ||
+  fail "--force restore deleted an unrelated file"
+
+incomplete_source="$test_root/incomplete-restore-source"
+cp -R "$restore_source" "$incomplete_source"
+rm -- "$incomplete_source/COMPLETE"
+missing_marker_target="$test_root/missing-marker-restore-target"
+if "$restore_script" "$incomplete_source" "$missing_marker_target" \
+  >/dev/null 2>"$test_root/incomplete-restore.err"; then
+  fail "snapshot without a COMPLETE marker was accepted"
+fi
+grep -q 'COMPLETE marker' "$test_root/incomplete-restore.err" ||
+  fail "missing COMPLETE marker was rejected with the wrong error"
+test ! -e "$missing_marker_target" ||
+  fail "rejected snapshot created the restore target"
+
+tampered_source="$test_root/tampered-restore-source"
+cp -R "$restore_source" "$tampered_source"
+printf 'tampered\n' >>"$tampered_source/database.dump"
+tampered_target="$test_root/tampered-restore-target"
+if "$restore_script" "$tampered_source" "$tampered_target" \
+  >/dev/null 2>"$test_root/tampered-restore.err"; then
+  fail "tampered snapshot was accepted by restore"
+fi
+grep -q 'verification failed' "$test_root/tampered-restore.err" ||
+  fail "tampered snapshot was rejected with the wrong error"
+test ! -e "$tampered_target" ||
+  fail "tampered snapshot created the restore target"
+
+database_target="$test_root/restored-database-target"
+pg_restore_log="$test_root/pg-restore.log"
+database_output=$(env \
+  SNAPVAULT_PG_RESTORE_BIN="$fake_bin/pg_restore" \
+  FAKE_PG_RESTORE_LOG="$pg_restore_log" \
+  "$restore_script" "$restore_source" "$database_target" --database 'postgres://restore-test')
+test "$(sed -n '1p' "$pg_restore_log")" = 'postgres://restore-test' ||
+  fail "pg_restore did not receive the database URL through PGDATABASE"
+test "$(sed -n '2p' "$pg_restore_log")" = "$restore_source/database.dump" ||
+  fail "pg_restore did not receive the snapshot database dump"
+printf '%s\n' "$database_output" | grep -q "^restored_database=ok$" ||
+  fail "restore with --database did not report success"
+cmp "$media_root/media-sources/source.webp" "$database_target/media-sources/source.webp" ||
+  fail "restore with --database did not extract the media"
+
+pg_restore_status=0
+env \
+  SNAPVAULT_PG_RESTORE_BIN="$fake_bin/pg_restore" \
+  FAKE_PG_RESTORE_LOG="$test_root/pg-restore-fail.log" \
+  FAKE_PG_RESTORE_FAIL=1 \
+  "$restore_script" "$restore_source" "$test_root/failed-database-target" \
+  --database 'postgres://restore-test' ||
+  pg_restore_status=$?
+test "$pg_restore_status" -eq 43 ||
+  fail "a failing pg_restore did not propagate its exit code"
+
+missing_pg_restore_target="$test_root/missing-pg-restore-target"
+if env \
+  SNAPVAULT_PG_RESTORE_BIN="$fake_bin/pg_restore-missing" \
+  "$restore_script" "$restore_source" "$missing_pg_restore_target" \
+  --database 'postgres://restore-test' >/dev/null 2>"$test_root/missing-pg-restore.err"; then
+  fail "restore with a missing pg_restore succeeded"
+fi
+grep -q 'PG_RESTORE_BIN' "$test_root/missing-pg-restore.err" ||
+  fail "missing pg_restore was rejected with the wrong error"
+test ! -e "$missing_pg_restore_target" ||
+  fail "missing pg_restore still created the restore target"
+
+expect_failure "$restore_script" "$restore_source" relative-restore-target
+expect_failure "$restore_script" "$restore_source" /
+expect_failure "$restore_script" "$test_root/does-not-exist" "$test_root/unused-target"
+expect_failure "$restore_script" "$restore_source" "$restore_source"
+symlink_restore_target="$test_root/symlink-restore-target"
+ln -s "$test_root/real-restore-target" "$symlink_restore_target"
+expect_failure "$restore_script" "$restore_source" "$symlink_restore_target"
+
+printf 'PASS: database and media snapshots are complete, verified, restorable and safely retained\n'

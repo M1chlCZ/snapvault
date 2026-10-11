@@ -4,9 +4,10 @@ A zero-dependency, non-root shell toolkit that makes verified snapshots of a
 PostgreSQL database and a media directory.
 
 `snapvault.sh` writes one timestamped snapshot directory. `snapvault-verify.sh`
-verifies that snapshot later, on the same host or on a different host. The
-snapshot format is plain files, so any user can inspect it without this
-toolkit.
+verifies that snapshot later, on the same host or on a different host.
+`snapvault-restore.sh` verifies a snapshot, extracts its media into a target
+directory and optionally restores its database with `pg_restore`. The snapshot
+format is plain files, so any user can inspect it without this toolkit.
 
 ## What it is
 
@@ -41,8 +42,9 @@ make retention safe.
 
 ## Install
 
-1. Copy `snapvault.sh` and `snapvault-verify.sh` into one directory.
-2. Make both files executable.
+1. Copy `snapvault.sh`, `snapvault-verify.sh` and `snapvault-restore.sh` into
+   one directory.
+2. Make the files executable.
 
 Requirements:
 
@@ -50,6 +52,7 @@ Requirements:
 - `pg_dump` (version equal to or newer than the database server)
 - `tar`
 - one SHA-256 tool: `sha256sum`, `gsha256sum`, or `shasum`
+- `pg_restore` (optional, only for `snapvault-restore.sh --database`)
 - `findmnt` (optional, Linux only, for the mount check)
 
 Do not run the toolkit with the root user.
@@ -89,12 +92,36 @@ To verify a snapshot that has no `COMPLETE` marker, add the
 
 ### Restore a snapshot
 
-Extract the media archive and run `pg_restore` on the database dump:
+```sh
+./snapvault-restore.sh /mnt/backups/app/snapshot-20260101T030000Z /mnt/app/media
+```
+
+The script verifies the snapshot first. It then extracts the media archive
+into the target directory with `tar` and `--no-same-owner`, so the restoring
+user owns the files. The script creates the target directory when it is
+missing. It refuses a non-empty existing target unless you add `--force`;
+`--force` extracts over the existing contents and leaves unrelated files in
+place.
+
+To restore the database as well, pass a connection string:
 
 ```sh
-tar -xzf media.tar.gz -C /mnt/app/media
-pg_restore --dbname=app_db_restore database.dump
+./snapvault-restore.sh /mnt/backups/app/snapshot-20260101T030000Z /mnt/app/media \
+  --database 'postgres://app@localhost/app_db'
 ```
+
+The script calls `pg_restore` on `database.dump` with the URL in `PGDATABASE`.
+A successful restore prints:
+
+```
+restored_media=/mnt/app/media
+restored_database=ok
+```
+
+Without `--database`, the second line is `restored_database=skipped`. The
+script never prints the URL, so credentials stay out of logs. The toolkit
+does not guarantee restored entry modification times; see
+[Limitations](#limitations).
 
 ### Retention
 
@@ -145,23 +172,30 @@ During a run, the temporary directory is inside the destination. Its name is
 | `SNAPVAULT_BACKUP_DESTINATION` | yes | none | Parent directory for snapshots. |
 | `SNAPVAULT_PREFIX` | no | `snapshot` | Snapshot name prefix. Lowercase letters, digits, and dashes only. |
 | `SNAPVAULT_PG_DUMP_BIN` | no | `pg_dump` | Path or name of the `pg_dump` binary. |
+| `SNAPVAULT_PG_RESTORE_BIN` | no | `pg_restore` | Path or name of the `pg_restore` binary. |
 | `SNAPVAULT_TIMESTAMP` | no | current UTC time | Snapshot timestamp in `YYYYMMDDTHHMMSSZ` form. |
 | `SNAPVAULT_RETENTION_DAYS` | no | unset (keep all) | Delete complete snapshots older than this number of days. |
 | `SNAPVAULT_TAR_BIN` | no | `tar` | Path or name of the `tar` binary. |
 | `SNAPVAULT_SHA256SUM_BIN` | no | auto-detected | Path or name of the SHA-256 tool. |
 
-`snapvault-verify.sh` uses `SNAPVAULT_TAR_BIN` and `SNAPVAULT_SHA256SUM_BIN`.
+`snapvault-verify.sh` and `snapvault-restore.sh` use `SNAPVAULT_TAR_BIN` and
+`SNAPVAULT_SHA256SUM_BIN`. `snapvault-restore.sh` also uses
+`SNAPVAULT_PG_RESTORE_BIN`.
 
 ## Path validation
 
-Both scripts reject unsafe paths:
+All three scripts reject unsafe paths:
 
 - The path must be absolute.
 - No path component can be a symbolic link.
 - The path cannot be `/` or `$HOME`.
 - The media root and the backup destination must be different directories.
+- The snapshot directory and the target directory must be different.
 - The backup destination must point inside a mount, not at the mount root.
   This check runs only when `findmnt` exists.
+- The snapshot directory must exist and contain a `COMPLETE` marker.
+- The target directory can be missing; the script creates it. A non-empty
+  target requires `--force`.
 
 ## Retention semantics
 
@@ -189,6 +223,9 @@ new snapshot.
 | `snapvault.sh` | other | A tool failed. The exit code comes from that tool, for example `pg_dump`. |
 | `snapvault-verify.sh` | 0 | The snapshot passed all checks. |
 | `snapvault-verify.sh` | 1 | The snapshot failed a check or the arguments are wrong. |
+| `snapvault-restore.sh` | 0 | The media and the requested database restore completed. |
+| `snapvault-restore.sh` | 1 | A validation error occurred, including a failed snapshot verification. |
+| `snapvault-restore.sh` | other | A tool failed. The exit code comes from that tool, for example `tar` or `pg_restore`. |
 
 ## Limitations
 
@@ -203,6 +240,9 @@ new snapshot.
   BSD tar has no `--mtime` and no `--sort` option. On BSD tar, the script
   normalizes the owner and uses its own sorted file list. The entry
   modification times stay as they are.
+- The toolkit does not guarantee restored entry modification times. Snapshots
+  from GNU tar normalize entry modification times to 1970-01-01; BSD tar keeps
+  the original times. Modes follow tar extraction semantics.
 - The `shasum` fallback has no GNU `--strict` mode.
 - `SNAPVAULT_DATABASE_URL`, `SNAPVAULT_MEDIA_ROOT` and
   `SNAPVAULT_BACKUP_DESTINATION` must not contain `$`, `${` or `}` so that
@@ -218,6 +258,7 @@ Run the syntax check on all scripts:
 ```sh
 bash -n snapvault.sh
 bash -n snapvault-verify.sh
+bash -n snapvault-restore.sh
 bash -n test/snapvault.test.sh
 ```
 
@@ -227,11 +268,12 @@ Run the test suite:
 bash test/snapvault.test.sh
 ```
 
-The test suite injects a fake `pg_dump` through `SNAPVAULT_PG_DUMP_BIN` and
-uses temporary directories. It
-does not touch a real database. It covers tampering, failed dumps, retention,
-path traversal, and the rejection of root, symlink, and unresolved-variable
-destinations.
+The test suite injects a fake `pg_dump` and fake `pg_restore` through
+`SNAPVAULT_PG_DUMP_BIN` and `SNAPVAULT_PG_RESTORE_BIN` and uses temporary
+directories. It does not touch a real database. It covers tampering, failed
+dumps, retention, path traversal, and the rejection of root, symlink, and
+unresolved-variable destinations. It also covers the restore round trip,
+`--force`, missing `COMPLETE` markers and the `pg_restore` invocation.
 
 The CI workflow runs the same commands on Ubuntu 24.04.
 
