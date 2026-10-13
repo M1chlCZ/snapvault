@@ -3,14 +3,22 @@ set -Eeuo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 verify_script="$script_dir/snapvault-verify.sh"
+temporary_input=
 
 fail() {
   printf 'snapvault-restore: %s\n' "$*" >&2
   exit 1
 }
 
+cleanup() {
+  if test -n "$temporary_input" && test -d "$temporary_input"; then
+    rm -rf -- "$temporary_input"
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+
 usage() {
-  printf 'usage: snapvault-restore.sh SNAPSHOT_DIR TARGET_DIR [--force] [--database URL]\n' >&2
+  printf 'usage: snapvault-restore.sh SNAPSHOT TARGET_DIR [--force] [--database URL]\n' >&2
 }
 
 canonicalize_absolute() {
@@ -75,14 +83,15 @@ reject_symlink_components() {
   done
 }
 
-validate_existing_directory() {
+validate_snapshot_input() {
   local name=$1
   local value=${!name}
   local resolved
   reject_unsafe_path "$name" "$value"
   reject_symlink_components "$name" "$value"
   test ! -L "$value" || fail "$name must not be a symlink"
-  test -d "$value" || fail "$name must be an existing directory"
+  test -d "$value" || test -f "$value" ||
+    fail "$name must be an existing directory or a snapshot artifact"
   resolved=$(canonicalize_absolute "$value")
   printf '%s\n' "$resolved"
 }
@@ -140,11 +149,10 @@ fi
 
 SNAPSHOT_DIR=$snapshot_argument
 TARGET_DIR=$target_argument
-snapshot_dir=$(validate_existing_directory SNAPSHOT_DIR)
+snapshot_dir=$(validate_snapshot_input SNAPSHOT_DIR)
 target_dir=$(validate_target_directory TARGET_DIR)
 test "$snapshot_dir" != "$target_dir" ||
   fail "snapshot directory and target directory must be different"
-test -f "$snapshot_dir/COMPLETE" || fail "snapshot has no COMPLETE marker"
 
 tar_bin=${SNAPVAULT_TAR_BIN:-tar}
 case "$tar_bin" in
@@ -156,6 +164,48 @@ case "$tar_bin" in
       fail "tar was not found"
     ;;
 esac
+
+if test -f "$snapshot_dir"; then
+  artifact_kind=
+  case "$snapshot_dir" in
+    *.tar.gz.age) artifact_kind=encrypted ;;
+    *.tar.gz) artifact_kind=plain ;;
+    *) fail "snapshot artifact must end in .tar.gz or .tar.gz.age" ;;
+  esac
+  temporary_input=$(mktemp -d)
+  archive=$snapshot_dir
+  if test "$artifact_kind" = encrypted; then
+    identity=${SNAPVAULT_AGE_IDENTITY_FILE:-}
+    test -n "$identity" ||
+      fail "SNAPVAULT_AGE_IDENTITY_FILE is required to decrypt this snapshot artifact"
+    test -f "$identity" || fail "SNAPVAULT_AGE_IDENTITY_FILE must be a regular file"
+    test ! -L "$identity" || fail "SNAPVAULT_AGE_IDENTITY_FILE must not be a symlink"
+    test -r "$identity" || fail "SNAPVAULT_AGE_IDENTITY_FILE is not readable"
+    age_bin=${SNAPVAULT_AGE_BIN:-age}
+    case "$age_bin" in
+      */*)
+        test -x "$age_bin" || fail "SNAPVAULT_AGE_BIN is not executable"
+        ;;
+      *)
+        age_bin=$(command -v "$age_bin") || fail "age was not found"
+        ;;
+    esac
+    "$age_bin" --decrypt --identity "$identity" \
+      --output "$temporary_input/snapshot.tar.gz" "$snapshot_dir"
+    test -s "$temporary_input/snapshot.tar.gz" || fail "decrypted archive is empty"
+    archive="$temporary_input/snapshot.tar.gz"
+  fi
+  while IFS= read -r archive_path; do
+    case "$archive_path" in
+      /*|../*|*/../*|*/..) fail "snapshot artifact contains an unsafe path" ;;
+    esac
+  done < <("$tar_bin" -tzf "$archive")
+  mkdir "$temporary_input/snapshot"
+  "$tar_bin" -xzf "$archive" -C "$temporary_input/snapshot"
+  snapshot_dir="$temporary_input/snapshot"
+fi
+
+test -f "$snapshot_dir/COMPLETE" || fail "snapshot has no COMPLETE marker"
 
 pg_restore_bin=
 if test -n "$database_url"; then

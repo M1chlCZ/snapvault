@@ -324,4 +324,400 @@ symlink_restore_target="$test_root/symlink-restore-target"
 ln -s "$test_root/real-restore-target" "$symlink_restore_target"
 expect_failure "$restore_script" "$restore_source" "$symlink_restore_target"
 
-printf 'PASS: database and media snapshots are complete, verified, restorable and safely retained\n'
+cat >"$fake_bin/age" <<'EOF'
+#!/bin/sh
+set -eu
+mode=
+recipient=
+identity=
+output=
+input=
+while test "$#" -gt 0; do
+  case "$1" in
+    --encrypt) mode=encrypt ;;
+    --decrypt) mode=decrypt ;;
+    --recipient)
+      shift
+      recipient=$1
+      ;;
+    --identity)
+      shift
+      identity=$1
+      ;;
+    --output)
+      shift
+      output=$1
+      ;;
+    -e) mode=encrypt ;;
+    -d) mode=decrypt ;;
+    -r)
+      shift
+      recipient=$1
+      ;;
+    -i)
+      shift
+      identity=$1
+      ;;
+    -o)
+      shift
+      output=$1
+      ;;
+    *)
+      input=$1
+      ;;
+  esac
+  shift
+done
+if test "${FAKE_AGE_FAIL:-0}" = "1"; then
+  printf 'fake age: forced failure\n' >&2
+  exit 91
+fi
+test -n "$mode" || { printf 'fake age: mode is required\n' >&2; exit 64; }
+test -n "$output" || { printf 'fake age: output is required\n' >&2; exit 64; }
+test -n "$input" || { printf 'fake age: input is required\n' >&2; exit 64; }
+case "$mode" in
+  encrypt)
+    test -n "$recipient" || { printf 'fake age: recipient is required\n' >&2; exit 64; }
+    if test -n "${FAKE_AGE_RECIPIENT_LOG:-}"; then
+      printf '%s\n' "$recipient" >>"$FAKE_AGE_RECIPIENT_LOG"
+    fi
+    printf 'FAKE-AGE-1\n' >"$output"
+    cat "$input" >>"$output"
+    ;;
+  decrypt)
+    test -n "$identity" || { printf 'fake age: identity is required\n' >&2; exit 64; }
+    if ! grep -q 'FAKE-AGE-IDENTITY' "$identity"; then
+      printf 'fake age: unknown identity\n' >&2
+      exit 92
+    fi
+    if test "$(head -c 10 "$input")" != 'FAKE-AGE-1'; then
+      printf 'fake age: input is not encrypted\n' >&2
+      exit 93
+    fi
+    tail -c +12 "$input" >"$output"
+    ;;
+  *)
+    printf 'fake age: unknown mode\n' >&2
+    exit 64
+    ;;
+esac
+EOF
+chmod +x "$fake_bin/age"
+
+cat >"$fake_bin/ssh" <<'EOF'
+#!/bin/sh
+set -eu
+log=${FAKE_SSH_LOG:-}
+batch=0
+strict=0
+connect=
+while test "$#" -gt 0; do
+  case "$1" in
+    -o)
+      shift
+      test "$#" -gt 0 || { printf 'fake ssh: missing option value\n' >&2; exit 64; }
+      case "$1" in
+        BatchMode=yes) batch=1 ;;
+        StrictHostKeyChecking=yes) strict=1 ;;
+        ConnectTimeout=*) connect=${1#ConnectTimeout=} ;;
+        *)
+          printf 'fake ssh: unexpected option: %s\n' "$1" >&2
+          exit 64
+          ;;
+      esac
+      ;;
+    -*)
+      printf 'fake ssh: unexpected option: %s\n' "$1" >&2
+      exit 64
+      ;;
+    *)
+      break
+      ;;
+  esac
+  shift
+done
+test "$batch" -eq 1 && test "$strict" -eq 1 ||
+  { printf 'fake ssh: strict options are required\n' >&2; exit 65; }
+case "$connect" in
+  ''|*[!0-9]*)
+    printf 'fake ssh: a numeric ConnectTimeout is required\n' >&2
+    exit 65
+    ;;
+esac
+test "$#" -eq 2 || { printf 'fake ssh: expected a host and one command\n' >&2; exit 66; }
+host=$1
+shift
+command=$1
+if test -n "$log"; then
+  printf '%s\t%s\n' "$host" "$command" >>"$log"
+fi
+if test "${FAKE_SSH_FAIL:-0}" = "1"; then
+  printf 'fake ssh: forced failure\n' >&2
+  exit 90
+fi
+case "$command" in
+  sha256sum*)
+    if test "${FAKE_SSH_WRONG_DIGEST:-0}" = "1"; then
+      printf '%s  wrong\n' '0000000000000000000000000000000000000000000000000000000000000000'
+      exit 0
+    fi
+    ;;
+esac
+shim_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/remote
+exec env PATH="$shim_dir:$PATH" sh -c "$command"
+EOF
+chmod +x "$fake_bin/ssh"
+
+remote_bin="$fake_bin/remote"
+sha_tool=
+for candidate in sha256sum gsha256sum shasum; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    sha_tool=$(command -v "$candidate")
+    break
+  fi
+done
+test -n "$sha_tool" || fail "no SHA-256 tool found for the fake remote"
+mkdir -p "$remote_bin"
+if test "${sha_tool##*/}" = shasum; then
+  {
+    printf '#!/bin/sh\n'
+    printf 'exec "%s" -a 256 "$@"\n' "$sha_tool"
+  } >"$remote_bin/sha256sum"
+else
+  {
+    printf '#!/bin/sh\n'
+    printf 'exec "%s" "$@"\n' "$sha_tool"
+  } >"$remote_bin/sha256sum"
+fi
+chmod +x "$remote_bin/sha256sum"
+
+identity_file="$test_root/identity.agekey"
+printf 'FAKE-AGE-IDENTITY\n' >"$identity_file"
+wrong_identity_file="$test_root/wrong-identity.agekey"
+printf 'FAKE-AGE-OTHER\n' >"$wrong_identity_file"
+recipient="age1$(printf 'q%.0s' {1..58})"
+
+encrypted_artifact="$destination/snapshot-20260829T140000Z.tar.gz.age"
+encrypted_output=$(SNAPVAULT_AGE_RECIPIENT="$recipient" \
+  SNAPVAULT_AGE_BIN="$fake_bin/age" \
+  SNAPVAULT_BACKUP_DESTINATION="$destination" \
+  SNAPVAULT_MEDIA_ROOT="$media_root" \
+  SNAPVAULT_DATABASE_URL="postgres://backup-test" \
+  SNAPVAULT_PG_DUMP_BIN="$fake_bin/pg_dump" \
+  SNAPVAULT_TIMESTAMP=20260829T140000Z \
+  "$backup_script" 2>"$test_root/encrypted.err")
+test "$encrypted_output" = "$encrypted_artifact" ||
+  fail "encrypted backup did not report its artifact"
+assert_file "$encrypted_artifact"
+test ! -e "$destination/snapshot-20260829T140000Z" ||
+  fail "encrypted backup kept the plain snapshot directory"
+case "$encrypted_output" in
+  *"$recipient"*) fail "encrypted backup printed the full recipient" ;;
+esac
+if grep -qF "$recipient" "$test_root/encrypted.err"; then
+  fail "encrypted backup logged the full recipient"
+fi
+grep -q 'encrypting for recipient age1' "$test_root/encrypted.err" ||
+  fail "encrypted backup did not log a redacted recipient"
+if find "$destination" -maxdepth 1 -name '.snapshot-20260829T140000Z*' -print -quit | grep -q .; then
+  fail "encrypted backup left staging directories"
+fi
+
+env SNAPVAULT_AGE_BIN="$fake_bin/age" SNAPVAULT_AGE_IDENTITY_FILE="$identity_file" \
+  "$verify_script" "$encrypted_artifact" >/dev/null ||
+  fail "the encrypted artifact did not verify with the identity"
+PATH="$fake_bin:$PATH" env SNAPVAULT_AGE_IDENTITY_FILE="$identity_file" \
+  "$verify_script" "$encrypted_artifact" >/dev/null ||
+  fail "the encrypted artifact did not verify with a PATH-injected age"
+
+if env SNAPVAULT_AGE_BIN="$fake_bin/age" SNAPVAULT_AGE_IDENTITY_FILE= \
+  "$verify_script" "$encrypted_artifact" >/dev/null 2>"$test_root/verify-no-identity.err"; then
+  fail "verify accepted an encrypted artifact without an identity"
+fi
+grep -q 'AGE_IDENTITY_FILE' "$test_root/verify-no-identity.err" ||
+  fail "verify rejected a missing identity with the wrong error"
+
+if env SNAPVAULT_AGE_BIN="$fake_bin/age" SNAPVAULT_AGE_IDENTITY_FILE="$wrong_identity_file" \
+  "$verify_script" "$encrypted_artifact" >/dev/null 2>"$test_root/verify-wrong-identity.err"; then
+  fail "verify accepted a wrong identity"
+fi
+
+restored_encrypted="$test_root/restored-encrypted"
+encrypted_restore_output=$(env \
+  SNAPVAULT_AGE_BIN="$fake_bin/age" \
+  SNAPVAULT_AGE_IDENTITY_FILE="$identity_file" \
+  "$restore_script" "$encrypted_artifact" "$restored_encrypted")
+printf '%s\n' "$encrypted_restore_output" | grep -q "^restored_media=$restored_encrypted$" ||
+  fail "restore from an encrypted artifact did not report restored_media"
+cmp "$media_root/media-sources/source.webp" "$restored_encrypted/media-sources/source.webp" ||
+  fail "restore from an encrypted artifact extracted different media"
+
+missing_identity_target="$test_root/missing-identity-target"
+if env SNAPVAULT_AGE_BIN="$fake_bin/age" SNAPVAULT_AGE_IDENTITY_FILE= \
+  "$restore_script" "$encrypted_artifact" "$missing_identity_target" \
+  >/dev/null 2>"$test_root/restore-no-identity.err"; then
+  fail "restore accepted an encrypted artifact without an identity"
+fi
+grep -q 'AGE_IDENTITY_FILE' "$test_root/restore-no-identity.err" ||
+  fail "restore rejected a missing identity with the wrong error"
+test ! -e "$missing_identity_target" ||
+  fail "restore without an identity created the target directory"
+
+printf 'not a snapshot\n' >"$test_root/unknown-artifact.bin"
+if "$verify_script" "$test_root/unknown-artifact.bin" >/dev/null 2>"$test_root/unknown-artifact.err"; then
+  fail "verify accepted a file with an unknown suffix"
+fi
+grep -q 'tar.gz' "$test_root/unknown-artifact.err" ||
+  fail "an unknown artifact suffix was rejected with the wrong error"
+
+remote_dir="$test_root/remote"
+ssh_log="$test_root/ssh.log"
+mkdir -p "$remote_dir"
+
+run_remote_backup() {
+  local timestamp=$1
+  env \
+    SNAPVAULT_REMOTE="fake@remote.example" \
+    SNAPVAULT_REMOTE_DIR="$remote_dir" \
+    SNAPVAULT_SSH_BIN="$fake_bin/ssh" \
+    FAKE_SSH_LOG="$ssh_log" \
+    SNAPVAULT_BACKUP_DESTINATION="$destination" \
+    SNAPVAULT_MEDIA_ROOT="$media_root" \
+    SNAPVAULT_DATABASE_URL="postgres://backup-test" \
+    SNAPVAULT_PG_DUMP_BIN="$fake_bin/pg_dump" \
+    SNAPVAULT_TIMESTAMP="$timestamp" \
+    "$backup_script"
+}
+
+expect_backup_failure() {
+  expect_failure env \
+    SNAPVAULT_BACKUP_DESTINATION="$destination" \
+    SNAPVAULT_MEDIA_ROOT="$media_root" \
+    SNAPVAULT_DATABASE_URL="postgres://backup-test" \
+    SNAPVAULT_PG_DUMP_BIN="$fake_bin/pg_dump" \
+    SNAPVAULT_TIMESTAMP=20260829T150300Z \
+    "$@" \
+    "$backup_script"
+}
+
+: >"$ssh_log"
+remote_encrypted_output=$(SNAPVAULT_AGE_RECIPIENT="$recipient" \
+  SNAPVAULT_AGE_BIN="$fake_bin/age" \
+  run_remote_backup 20260829T150000Z 2>"$test_root/remote-encrypted.err") ||
+  fail "encrypted remote backup failed"
+remote_encrypted_name=snapshot-20260829T150000Z.tar.gz.age
+remote_encrypted_artifact="$remote_dir/$remote_encrypted_name"
+test "$remote_encrypted_output" = "fake@remote.example:$remote_encrypted_artifact" ||
+  fail "remote backup did not report the remote artifact"
+assert_file "$remote_encrypted_artifact"
+if find "$remote_dir" -maxdepth 1 -name '*.incomplete' -print -quit | grep -q .; then
+  fail "remote backup left an .incomplete file"
+fi
+if find "$destination" -maxdepth 1 \
+  \( -name 'snapshot-20260829T150000Z*' -o -name '.snapshot-20260829T150000Z*' \) \
+  -print -quit | grep -q .; then
+  fail "remote backup left a local artifact or staging directory"
+fi
+env SNAPVAULT_AGE_BIN="$fake_bin/age" SNAPVAULT_AGE_IDENTITY_FILE="$identity_file" \
+  "$verify_script" "$remote_encrypted_artifact" >/dev/null ||
+  fail "the remote encrypted artifact did not verify"
+upload_line=$(grep -nF "cat > '$remote_dir/.$remote_encrypted_name.incomplete'" "$ssh_log" |
+  sed -n '1s/:.*//p' || true)
+checksum_line=$(grep -nF "sha256sum '$remote_dir/.$remote_encrypted_name.incomplete'" "$ssh_log" |
+  sed -n '1s/:.*//p' || true)
+rename_line=$(grep -nF "mv -- '$remote_dir/.$remote_encrypted_name.incomplete' '$remote_encrypted_artifact'" "$ssh_log" |
+  sed -n '1s/:.*//p' || true)
+test -n "$upload_line" || fail "the artifact was not uploaded to a staging name"
+test -n "$checksum_line" || fail "the remote checksum was not checked"
+test -n "$rename_line" || fail "the staged artifact was not renamed"
+test "$upload_line" -lt "$checksum_line" ||
+  fail "the remote checksum ran before the upload"
+test "$checksum_line" -lt "$rename_line" ||
+  fail "the remote rename ran before the checksum"
+if grep -Eq 'rm --|rm -|rmdir' "$ssh_log"; then
+  fail "a remote command attempted a deletion"
+fi
+
+: >"$ssh_log"
+mismatch_status=0
+FAKE_SSH_WRONG_DIGEST=1 SNAPVAULT_AGE_RECIPIENT="$recipient" SNAPVAULT_AGE_BIN="$fake_bin/age" \
+  run_remote_backup 20260829T150050Z >/dev/null 2>"$test_root/remote-mismatch.err" ||
+  mismatch_status=$?
+test "$mismatch_status" -ne 0 || fail "a remote checksum mismatch succeeded"
+grep -q 'checksum differs' "$test_root/remote-mismatch.err" ||
+  fail "a remote checksum mismatch produced the wrong error"
+test ! -e "$remote_dir/snapshot-20260829T150050Z.tar.gz.age" ||
+  fail "a remote checksum mismatch published the artifact"
+test -f "$remote_dir/.snapshot-20260829T150050Z.tar.gz.age.incomplete" ||
+  fail "a remote checksum mismatch deleted the staging file"
+if grep -F 'mv -- ' "$ssh_log" | grep -qF '150050Z'; then
+  fail "a remote checksum mismatch renamed the staging file"
+fi
+
+: >"$ssh_log"
+failure_status=0
+FAKE_SSH_FAIL=1 SNAPVAULT_AGE_RECIPIENT="$recipient" SNAPVAULT_AGE_BIN="$fake_bin/age" \
+  run_remote_backup 20260829T150100Z >/dev/null 2>"$test_root/remote-fail.err" ||
+  failure_status=$?
+test "$failure_status" -eq 90 ||
+  fail "remote failure did not propagate the ssh exit code"
+test ! -e "$remote_dir/snapshot-20260829T150100Z.tar.gz.age" ||
+  fail "remote failure published the artifact"
+test ! -e "$remote_dir/.snapshot-20260829T150100Z.tar.gz.age.incomplete" ||
+  fail "remote failure left a staging file"
+if find "$destination" -maxdepth 1 \
+  \( -name 'snapshot-20260829T150100Z*' -o -name '.snapshot-20260829T150100Z*' \) \
+  -print -quit | grep -q .; then
+  fail "remote failure left a local fallback"
+fi
+
+: >"$ssh_log"
+plain_remote_output=$(env \
+  PATH="$fake_bin:$PATH" \
+  SNAPVAULT_REMOTE="fake@remote.example" \
+  SNAPVAULT_REMOTE_DIR="$remote_dir" \
+  FAKE_SSH_LOG="$ssh_log" \
+  SNAPVAULT_BACKUP_DESTINATION="$destination" \
+  SNAPVAULT_MEDIA_ROOT="$media_root" \
+  SNAPVAULT_DATABASE_URL="postgres://backup-test" \
+  SNAPVAULT_PG_DUMP_BIN="$fake_bin/pg_dump" \
+  SNAPVAULT_TIMESTAMP=20260829T150200Z \
+  "$backup_script") ||
+  fail "plain remote backup with a PATH-injected ssh failed"
+plain_remote_name=snapshot-20260829T150200Z.tar.gz
+plain_remote_artifact="$remote_dir/$plain_remote_name"
+test "$plain_remote_output" = "fake@remote.example:$plain_remote_artifact" ||
+  fail "plain remote backup reported the wrong artifact"
+assert_file "$plain_remote_artifact"
+"$verify_script" "$plain_remote_artifact" >/dev/null ||
+  fail "the plain remote artifact did not verify"
+if find "$remote_dir" -maxdepth 1 -name ".$plain_remote_name.incomplete" -print -quit | grep -q .; then
+  fail "plain remote backup left an .incomplete file"
+fi
+plain_remote_restore="$test_root/restored-plain-remote"
+"$restore_script" "$plain_remote_artifact" "$plain_remote_restore" >/dev/null ||
+  fail "restore from a plain remote artifact failed"
+cmp "$media_root/media-sources/source.webp" "$plain_remote_restore/media-sources/source.webp" ||
+  fail "restore from a plain remote artifact extracted different media"
+
+retention_output=$(SNAPVAULT_RETENTION_DAYS=1 run_remote_backup 20260829T150250Z 2>&1 >/dev/null) ||
+  fail "remote backup with retention failed"
+printf '%s\n' "$retention_output" | grep -q 'ignored in remote mode' ||
+  fail "remote retention did not warn"
+
+expect_backup_failure \
+  SNAPVAULT_REMOTE="fake@remote.example" \
+  SNAPVAULT_REMOTE_DIR="relative/remote" \
+  SNAPVAULT_SSH_BIN="$fake_bin/ssh"
+expect_backup_failure \
+  SNAPVAULT_REMOTE="fake@remote.example" \
+  SNAPVAULT_REMOTE_DIR='/remote;rm -rf /' \
+  SNAPVAULT_SSH_BIN="$fake_bin/ssh"
+expect_backup_failure SNAPVAULT_REMOTE_DIR="$remote_dir"
+expect_backup_failure SNAPVAULT_REMOTE="user@-host" \
+  SNAPVAULT_REMOTE_DIR="$remote_dir" \
+  SNAPVAULT_SSH_BIN="$fake_bin/ssh"
+expect_backup_failure SNAPVAULT_AGE_RECIPIENT="not-an-age-key" \
+  SNAPVAULT_AGE_BIN="$fake_bin/age"
+
+printf 'PASS: snapshots are complete, verified, restorable, encryptable and remotely publishable\n'

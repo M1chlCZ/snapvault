@@ -4,7 +4,36 @@ All notable changes to snapvault are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.2.0] - 2026-10-17
+## [Unreleased]
+
+### Added
+
+- Optional age encryption: `SNAPVAULT_AGE_RECIPIENT` packs the verified
+  snapshot into a single `snapshot-<timestamp>.tar.gz.age` artifact and
+  removes the plain snapshot directory from the destination. Use
+  `SNAPVAULT_AGE_BIN` to select the `age` binary.
+- `snapvault-verify.sh` and `snapvault-restore.sh` accept snapshot artifacts.
+  An encrypted `.tar.gz.age` artifact requires `SNAPVAULT_AGE_IDENTITY_FILE`.
+  A plain transport `.tar.gz` artifact needs no identity. The identity file is
+  read-only input; it is never copied into a snapshot or uploaded.
+- Remote publication: `SNAPVAULT_REMOTE` and `SNAPVAULT_REMOTE_DIR` upload the
+  transport tarball to a dot-prefixed `.incomplete` name, compare the remote
+  SHA-256 with the local one, and rename the file atomically. The toolkit
+  never deletes a remote file. Use `SNAPVAULT_SSH_BIN` to select the `ssh`
+  binary.
+- Tests for encrypted publication, artifact verification and restore, remote
+  staging, a checksum mismatch, a remote failure without a local fallback, a
+  plain remote publication, and the new validation rules, with fake `age` and
+  `ssh` binaries.
+- README sections for encryption, remote publication, and the staging
+  protocol.
+
+### Fixed
+
+- Corrected the `[0.2.0]` release date from 2026-10-17 to 2026-10-11, the day
+  the tag was created.
+
+## [0.2.0] - 2026-10-11
 
 ### Added
 

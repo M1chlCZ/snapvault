@@ -5,6 +5,7 @@ umask 077
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 verify_script="$script_dir/snapvault-verify.sh"
 temporary_snapshot=
+temporary_transport=
 
 fail() {
   printf 'snapvault: %s\n' "$*" >&2
@@ -14,6 +15,9 @@ fail() {
 cleanup() {
   if test -n "$temporary_snapshot" && test -d "$temporary_snapshot"; then
     rm -rf -- "$temporary_snapshot"
+  fi
+  if test -n "$temporary_transport" && test -d "$temporary_transport"; then
+    rm -rf -- "$temporary_transport"
   fi
 }
 trap cleanup EXIT HUP INT TERM
@@ -36,6 +40,13 @@ snapshot_prefix_from_env() {
     -*|*-) fail "SNAPVAULT_PREFIX must not start or end with a dash" ;;
   esac
   printf '%s\n' "$value"
+}
+
+redact_recipient() {
+  local value=$1
+  local prefix=${value%"${value#????????}"}
+  local suffix=${value#"${value%????}"}
+  printf '%s...%s\n' "$prefix" "$suffix"
 }
 
 canonicalize_absolute() {
@@ -105,6 +116,35 @@ validate_directory() {
       fail "$name must point inside a mount, not at its root"
   fi
   printf '%s\n' "$resolved"
+}
+
+remote_directory_from_env() {
+  local value=${SNAPVAULT_REMOTE_DIR:-}
+  local component
+  local rest
+  local -a parts=()
+  local IFS=/
+  test -n "$value" || fail "SNAPVAULT_REMOTE_DIR is required with SNAPVAULT_REMOTE"
+  case "$value" in
+    /*) ;;
+    *) fail "SNAPVAULT_REMOTE_DIR must be an absolute path" ;;
+  esac
+  test "$value" != "/" || fail "SNAPVAULT_REMOTE_DIR must not be the filesystem root"
+  rest=${value#/}
+  set -f
+  parts=($rest)
+  set +f
+  for component in "${parts[@]}"; do
+    case "$component" in
+      ''|.|..)
+        fail "SNAPVAULT_REMOTE_DIR must not contain empty, . or .. components"
+        ;;
+      *[!A-Za-z0-9._-]*)
+        fail "SNAPVAULT_REMOTE_DIR contains unsupported characters"
+        ;;
+    esac
+  done
+  printf '%s\n' "$value"
 }
 
 sha256_tool=${SNAPVAULT_SHA256SUM_BIN:-}
@@ -177,6 +217,52 @@ if "$tar_bin" --version 2>/dev/null | head -n 1 | grep -q 'GNU tar'; then
   tar_kind=gnu
 fi
 
+age_recipient=${SNAPVAULT_AGE_RECIPIENT:-}
+age_bin=
+if test -n "$age_recipient"; then
+  [[ "$age_recipient" =~ ^age1[0-9a-z]{58}$ ]] ||
+    fail "SNAPVAULT_AGE_RECIPIENT must be one age public key"
+  age_bin=${SNAPVAULT_AGE_BIN:-age}
+  case "$age_bin" in
+    */*)
+      test -x "$age_bin" || fail "SNAPVAULT_AGE_BIN is not executable"
+      ;;
+    *)
+      age_bin=$(command -v "$age_bin") ||
+        fail "age was not found; install age or unset SNAPVAULT_AGE_RECIPIENT"
+      ;;
+  esac
+fi
+
+remote=${SNAPVAULT_REMOTE:-}
+remote_dir=
+ssh_bin=
+ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10)
+if test -z "$remote" && test -n "${SNAPVAULT_REMOTE_DIR:-}"; then
+  fail "SNAPVAULT_REMOTE_DIR requires SNAPVAULT_REMOTE"
+fi
+if test -n "$remote"; then
+  case "$remote" in
+    *[!A-Za-z0-9._@-]*|-*|@*|*@|*@*@*)
+      fail "SNAPVAULT_REMOTE must be [user@]host"
+      ;;
+  esac
+  case "${remote##*@}" in
+    -*|'') fail "SNAPVAULT_REMOTE must be [user@]host" ;;
+  esac
+  remote_dir=$(remote_directory_from_env)
+  ssh_bin=${SNAPVAULT_SSH_BIN:-ssh}
+  case "$ssh_bin" in
+    */*)
+      test -x "$ssh_bin" || fail "SNAPVAULT_SSH_BIN is not executable"
+      ;;
+    *)
+      ssh_bin=$(command -v "$ssh_bin") ||
+        fail "ssh was not found; install ssh or unset SNAPVAULT_REMOTE"
+      ;;
+  esac
+fi
+
 timestamp=${SNAPVAULT_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}
 [[ "$timestamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] ||
   fail "SNAPVAULT_TIMESTAMP must use YYYYMMDDTHHMMSSZ"
@@ -237,10 +323,70 @@ test -s "$temporary_snapshot/database.dump" || fail "database dump is empty"
 
 "$verify_script" --allow-incomplete "$temporary_snapshot" >/dev/null
 printf 'completed_at=%s\n' "$timestamp" >"$temporary_snapshot/COMPLETE"
-mv -- "$temporary_snapshot" "$final_snapshot"
-temporary_snapshot=
+
+artifact_file=
+artifact_name=
+if test -n "$age_recipient" || test -n "$remote"; then
+  temporary_transport=$(mktemp -d "$backup_destination/.$snapshot_name.transport.XXXXXX")
+  "$tar_bin" -czf "$temporary_transport/snapshot.tar.gz" -C "$temporary_snapshot" .
+  test -s "$temporary_transport/snapshot.tar.gz" || fail "transport archive is empty"
+  artifact_file="$temporary_transport/snapshot.tar.gz"
+  artifact_name="$snapshot_name.tar.gz"
+  if test -n "$age_recipient"; then
+    printf 'snapvault: encrypting for recipient %s\n' \
+      "$(redact_recipient "$age_recipient")" >&2
+    "$age_bin" --encrypt --recipient "$age_recipient" \
+      --output "$temporary_transport/snapshot.tar.gz.age" \
+      "$temporary_transport/snapshot.tar.gz"
+    test -s "$temporary_transport/snapshot.tar.gz.age" ||
+      fail "encrypted artifact is empty"
+    rm -- "$temporary_transport/snapshot.tar.gz"
+    artifact_file="$temporary_transport/snapshot.tar.gz.age"
+    artifact_name="$snapshot_name.tar.gz.age"
+  fi
+fi
+
+if test -n "$remote"; then
+  remote_artifact="$remote_dir/$artifact_name"
+  remote_staging="$remote_dir/.$artifact_name.incomplete"
+  local_digest=$(sha256_one "$artifact_file")
+  local_digest=${local_digest%% *}
+  "$ssh_bin" "${ssh_options[@]}" "$remote" \
+    "set -eu; umask 077; test -d '$remote_dir'; test ! -L '$remote_dir'; test ! -e '$remote_artifact'; cat > '$remote_staging'" \
+    <"$artifact_file"
+  remote_digest=$("$ssh_bin" "${ssh_options[@]}" "$remote" \
+    "sha256sum '$remote_staging'" </dev/null)
+  remote_digest=${remote_digest%% *}
+  [[ "$remote_digest" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "remote host did not return a SHA-256 checksum"
+  test "$remote_digest" = "$local_digest" ||
+    fail "remote checksum differs; the artifact was not published"
+  "$ssh_bin" "${ssh_options[@]}" "$remote" \
+    "mv -- '$remote_staging' '$remote_artifact'" </dev/null
+  final_snapshot="$remote:$remote_artifact"
+  rm -rf -- "$temporary_snapshot"
+  temporary_snapshot=
+elif test -n "$age_recipient"; then
+  test ! -e "$backup_destination/$artifact_name" ||
+    fail "snapshot artifact already exists: $artifact_name"
+  mv -- "$artifact_file" "$backup_destination/$artifact_name"
+  final_snapshot="$backup_destination/$artifact_name"
+  rm -rf -- "$temporary_snapshot"
+  temporary_snapshot=
+else
+  mv -- "$temporary_snapshot" "$final_snapshot"
+  temporary_snapshot=
+fi
+if test -n "$temporary_transport" && test -d "$temporary_transport"; then
+  rm -rf -- "$temporary_transport"
+  temporary_transport=
+fi
 
 retention_days=${SNAPVAULT_RETENTION_DAYS:-}
+if test -n "$retention_days" && test -n "$remote"; then
+  printf 'snapvault: warning: SNAPVAULT_RETENTION_DAYS is ignored in remote mode; remote artifacts are never deleted\n' >&2
+  retention_days=
+fi
 if test -n "$retention_days"; then
   [[ "$retention_days" =~ ^[0-9]{1,5}$ ]] ||
     fail "SNAPVAULT_RETENTION_DAYS must be a non-negative integer"
