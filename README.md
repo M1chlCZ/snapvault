@@ -1,14 +1,16 @@
 # snapvault
 
-A zero-dependency, non-root shell toolkit that makes verified snapshots of a
-PostgreSQL database and a media directory.
+A set of shell scripts that make verified snapshots of a PostgreSQL database
+and a media directory. It runs without root access and without a background
+service.
 
-`snapvault.sh` writes one timestamped snapshot. `snapvault-verify.sh` verifies
-that snapshot later, on the same host or on a different host.
-`snapvault-restore.sh` verifies a snapshot, extracts its media into a target
-directory and optionally restores its database with `pg_restore`. A snapshot
-can be a directory or a single transport tarball, encrypted or plain. The
-plain snapshot format is plain files, so any user can inspect it without this
+`snapvault.sh` writes one timestamped snapshot. `snapvault-verify.sh` checks it
+later, on the same host or another one. `snapvault-restore.sh` verifies the
+snapshot, extracts the media into a target directory, and optionally restores
+the database with `pg_restore`.
+
+A snapshot is either a directory or a single transport tarball, encrypted or
+plain. The plain format is just files, so anyone can inspect it without this
 toolkit.
 
 ## What it is
@@ -19,13 +21,13 @@ produces one snapshot with these properties:
 - The name contains a UTC timestamp.
 - The database is a custom-format `pg_dump`.
 - The media is one gzip tarball. With GNU tar it is byte-deterministic. With
-  BSD tar the member order and the owner are normalized; entry modification
+  BSD tar the member order and the owner are normalised; entry modification
   times stay as they are.
 - A per-file `media-index.sha256` and a top-level `SHA256SUMS` cover the data.
 - A `COMPLETE` marker shows that the snapshot passed verification.
 
-The script writes to a temporary directory first. It verifies the temporary
-directory. Then it publishes it. A failed run leaves no final snapshot.
+The script writes to a temporary directory, verifies it, then publishes it. A
+failed run leaves no final snapshot.
 
 Two optional features change the published form:
 
@@ -38,16 +40,16 @@ Two optional features change the published form:
 
 `snapvault-verify.sh` verifies the checksums, rejects absolute member names
 and members that contain `..`, extracts the media archive to a temporary
-directory, and verifies the media index again. For an artifact, it decrypts or
-extracts to a private temporary directory first and cleans up afterwards.
+directory and checks the media index again. For an artifact, it decrypts or
+extracts into a private temporary directory first and cleans up afterwards.
 
 ## Why
 
-A backup daemon adds a service that you must install, monitor, and upgrade.
-This toolkit uses the tools that a PostgreSQL host usually has. A cron job is
-sufficient. You do not need the root user.
+A backup daemon adds a service you have to install, monitor and upgrade. This
+toolkit uses tools a PostgreSQL host usually has, so a cron job is enough and
+you don't need root.
 
-The snapshot is self-describing. A reviewer can verify it with standard tools,
+The snapshot describes itself. A reviewer can verify it with standard tools,
 even without this toolkit. The `COMPLETE` marker and the strict name pattern
 make retention safe.
 
@@ -62,14 +64,14 @@ Requirements:
 - bash 3.2 or later
 - `pg_dump` (version equal to or newer than the database server)
 - `tar`
-- one SHA-256 tool: `sha256sum`, `gsha256sum`, or `shasum`
+- one SHA-256 tool: `sha256sum`, `gsha256sum` or `shasum`
 - `pg_restore` (optional, only for `snapvault-restore.sh --database`)
 - `age` (optional, only for encryption)
 - `ssh` and a strict SSH setup (optional, only for remote publication)
 - `sha256sum` on the remote host (optional, only for remote publication)
 - `findmnt` (optional, Linux only, for the mount check)
 
-Do not run the toolkit with the root user.
+Don't run the toolkit as root.
 
 ## Usage
 
@@ -121,7 +123,7 @@ sizes and metadata only; it hashes nothing:
 
 The text output has one row per entry with its kind (`plain`, `encrypted`,
 `transport` or `incomplete`), its state (`complete` or `incomplete`), its size
-in bytes, its age in days, and its name. With `--retention-days DAYS`, entries
+in bytes, its age in days and its name. With `--retention-days DAYS`, entries
 that retention would delete carry an `(expired)` marker. The `--json` output
 carries the same fields plus `destination`, `retentionDays`, and each entry's
 `expired` flag and `completedAt` value when it is known. The exit code is `0`
@@ -134,15 +136,14 @@ when at least one entry exists, `1` when the destination has no snapshots, and
 ./snapvault-restore.sh /mnt/backups/app/snapshot-20260101T030000Z /mnt/app/media
 ```
 
-The script verifies the snapshot first. It then extracts the media archive
-into the target directory with `tar` and `--no-same-owner`, so the restoring
-user owns the files. The script creates the target directory when it is
-missing. It refuses a non-empty existing target unless you add `--force`;
-`--force` extracts over the existing contents and leaves unrelated files in
-place.
+The script verifies the snapshot, then extracts the media archive into the
+target directory with `tar` and `--no-same-owner`, so the restoring user owns
+the files. It creates the target directory when it is missing and refuses a
+non-empty target unless you add `--force`. With `--force`, it extracts over the
+existing contents and leaves unrelated files in place.
 
 The first argument accepts the same three forms as `snapvault-verify.sh`: a
-directory, an encrypted artifact, or a plain artifact.
+directory, an encrypted artifact or a plain artifact.
 
 To restore the database as well, pass a connection string:
 
@@ -160,8 +161,8 @@ restored_database=ok
 ```
 
 Without `--database`, the second line is `restored_database=skipped`. The
-script never prints the URL, so credentials stay out of logs. The toolkit
-does not guarantee restored entry modification times; see
+script never prints the URL, so credentials stay out of the logs. The toolkit
+makes no promises about restored entry modification times; see
 [Limitations](#limitations).
 
 ### Encrypt a snapshot
@@ -198,7 +199,7 @@ export SNAPVAULT_AGE_IDENTITY_FILE="$HOME/.age/app.key"
 The identity file is read-only input. The toolkit never copies it into a
 snapshot and never uploads it. Without `SNAPVAULT_AGE_IDENTITY_FILE`,
 `snapvault-verify.sh` and `snapvault-restore.sh` fail with an error on an
-encrypted artifact. They do not skip the verification.
+encrypted artifact. They don't skip verification.
 
 Retention never deletes an encrypted artifact; see
 [Retention semantics](#retention-semantics).
@@ -223,8 +224,8 @@ The script prints the remote artifact:
 backup@app-nas:/volume1/backups/app/snapshot-20260101T030000Z.tar.gz.age
 ```
 
-The remote directory must exist. The script does not create it and never
-deletes a remote file.
+The remote directory must exist already. The script doesn't create it and
+never deletes a remote file.
 
 The transport tarball is encrypted when `SNAPVAULT_AGE_RECIPIENT` is set and a
 plain `.tar.gz` otherwise. The local destination is only a staging area.
@@ -250,7 +251,7 @@ The script publishes one remote artifact in four steps:
    run.
 4. Rename the `.incomplete` file to the final name. The rename is atomic.
 
-This protocol is better than a plain `rsync` copy:
+It beats a plain `rsync` copy:
 
 - A reader can never see a partial artifact under the final name. The final
   name appears only after the upload is complete and its checksum matches.
@@ -258,9 +259,9 @@ This protocol is better than a plain `rsync` copy:
 - The atomic rename is the commit point. An interrupted run leaves only a
   dot-prefixed `.incomplete` file, never a broken final artifact.
 
-The toolkit never renames a `.incomplete` file that failed the checksum and
-never deletes a remote file. A failed or interrupted run can leave a stale
-`.incomplete` file. Remove it on the remote host.
+The toolkit never renames a `.incomplete` file that failed the checksum, and
+it never deletes a remote file. A failed or interrupted run can leave a stale
+`.incomplete` file; remove it on the remote host.
 
 ### Retention
 
@@ -315,7 +316,7 @@ snapshot-20260101T030000Z.tar.gz.age
 - `media-index.sha256` lists the relative path and the SHA-256 of each media
   file.
 - `media.tar.gz` contains the same media files.
-- `SHA256SUMS` covers `database.dump`, `media.tar.gz`, and
+- `SHA256SUMS` covers `database.dump`, `media.tar.gz` and
   `media-index.sha256`.
 
 The transport tarball is a gzip tarball of the snapshot directory contents.
@@ -335,7 +336,7 @@ are inside the destination. Their names start with a dot:
 | `SNAPVAULT_DATABASE_URL` | yes | none | PostgreSQL connection string. The script passes it to `pg_dump` as `PGDATABASE`. |
 | `SNAPVAULT_MEDIA_ROOT` | yes | none | Media directory to archive. |
 | `SNAPVAULT_BACKUP_DESTINATION` | yes | none | Local staging directory for snapshots and artifacts. |
-| `SNAPVAULT_PREFIX` | no | `snapshot` | Snapshot name prefix. Lowercase letters, digits, and dashes only. |
+| `SNAPVAULT_PREFIX` | no | `snapshot` | Snapshot name prefix. Lowercase letters, digits and dashes only. |
 | `SNAPVAULT_PG_DUMP_BIN` | no | `pg_dump` | Path or name of the `pg_dump` binary. |
 | `SNAPVAULT_PG_RESTORE_BIN` | no | `pg_restore` | Path or name of the `pg_restore` binary. |
 | `SNAPVAULT_TIMESTAMP` | no | current UTC time | Snapshot timestamp in `YYYYMMDDTHHMMSSZ` form. |
@@ -425,20 +426,19 @@ Retention covers plain snapshot directories only:
 
 ## Limitations
 
-- This toolkit does not replace pgBackRest, restic, or Borg for large
+- This toolkit does not replace pgBackRest, restic or Borg for large
   installations. It has no WAL archiving, no point-in-time recovery, no
-  incremental backup, and no parallelism.
+  incremental backup and no parallelism.
 - The media directory can change during the run. The toolkit takes no lock and
   no filesystem snapshot. Stop the writers first, or use a filesystem snapshot.
 - Every run makes a full `pg_dump` and a full media tarball.
 - The mount check needs `findmnt`. On other systems the check is absent.
-- GNU tar normalizes the file order, the modification times, and the owner.
-  BSD tar has no `--mtime` and no `--sort` option. On BSD tar, the script
-  normalizes the owner and uses its own sorted file list. The entry
-  modification times stay as they are.
-- The toolkit does not guarantee restored entry modification times. Snapshots
-  from GNU tar normalize entry modification times to 1970-01-01; BSD tar keeps
-  the original times. Modes follow tar extraction semantics.
+- GNU tar normalises file order, modification times and owner. BSD tar has no
+  `--mtime` or `--sort`, so the script normalises the owner and supplies its
+  own sorted file list; entry modification times stay as they are.
+- The toolkit makes no promises about restored entry modification times.
+  Snapshots from GNU tar normalise entry modification times to 1970-01-01;
+  BSD tar keeps the original times. Modes follow tar extraction semantics.
 - The `shasum` fallback has no GNU `--strict` mode.
 - `SNAPVAULT_DATABASE_URL`, `SNAPVAULT_MEDIA_ROOT` and
   `SNAPVAULT_BACKUP_DESTINATION` must not contain `$`, `${` or `}` so that
@@ -452,7 +452,7 @@ Retention covers plain snapshot directories only:
 - Remote publication needs `ssh` and a reachable remote directory. The toolkit
   never creates or deletes remote files.
 - Remote retention is not available. The toolkit never deletes a remote
-  artifact, and it skips `SNAPVAULT_RETENTION_DAYS` in remote mode.
+  artifact and it skips `SNAPVAULT_RETENTION_DAYS` in remote mode.
 - A failed or interrupted remote run can leave a dot-prefixed `.incomplete`
   file on the remote host. It is never a published artifact.
 - The remote host must provide `sha256sum`.
@@ -479,8 +479,8 @@ bash test/snapvault.test.sh
 The test suite injects fake `pg_dump`, `pg_restore`, `age` and `ssh` binaries
 through the `SNAPVAULT_*_BIN` variables and uses temporary directories. It
 does not touch a real database or a real remote host. It covers tampering,
-failed dumps, retention, path traversal, and the rejection of root, symlink,
-and unresolved-variable destinations. It also covers the restore round trip,
+failed dumps, retention, path traversal, and the rejection of root, symlink and
+unresolved-variable destinations. It also covers the restore round trip,
 `--force`, missing `COMPLETE` markers, the `pg_restore` invocation, encrypted
 publication, artifact verification and restore with and without an identity,
 remote staging with a checksum and an atomic rename, a checksum mismatch, a
@@ -488,6 +488,6 @@ remote failure without a local fallback, and plain remote publication.
 
 The CI workflow runs the same commands on Ubuntu 24.04.
 
-## License
+## Licence
 
 MIT. See [LICENSE](LICENSE).
