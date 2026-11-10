@@ -720,4 +720,57 @@ expect_backup_failure SNAPVAULT_REMOTE="user@-host" \
 expect_backup_failure SNAPVAULT_AGE_RECIPIENT="not-an-age-key" \
   SNAPVAULT_AGE_BIN="$fake_bin/age"
 
+status_script="$repo_root/snapvault-status.sh"
+
+rm -rf -- "$incomplete_snapshot"
+
+dry_run_snapshot="$destination/snapshot-20000102T000000Z"
+mkdir "$dry_run_snapshot"
+touch "$dry_run_snapshot/COMPLETE"
+if set_mtime_days_ago "$dry_run_snapshot" 4; then
+  dry_run_output=$(
+    SNAPVAULT_RETENTION_DAYS=1 \
+    SNAPVAULT_RETENTION_DRY_RUN=1 \
+    run_backup 20260829T120260Z 2>&1 >/dev/null
+  )
+  test -d "$dry_run_snapshot" || fail "retention dry-run deleted a snapshot"
+  printf '%s\n' "$dry_run_output" | grep -q 'would delete' ||
+    fail "retention dry-run did not report a candidate"
+  test -d "$destination/snapshot-20260829T120260Z" ||
+    fail "retention dry-run removed the new snapshot"
+else
+  printf 'SKIP: cannot set a directory mtime; dry-run retention is not exercised\n'
+fi
+
+expect_failure env \
+  SNAPVAULT_BACKUP_DESTINATION="$destination" \
+  SNAPVAULT_MEDIA_ROOT="$media_root" \
+  SNAPVAULT_DATABASE_URL="postgres://backup-test" \
+  SNAPVAULT_PG_DUMP_BIN="$fake_bin/pg_dump" \
+  SNAPVAULT_TIMESTAMP=20260829T120270Z \
+  SNAPVAULT_RETENTION_DAYS=1 \
+  SNAPVAULT_RETENTION_DRY_RUN=yes \
+  "$backup_script"
+
+status_text=$("$status_script" "$destination")
+printf '%s\n' "$status_text" | grep -q 'snapshot-20260829T120260Z' ||
+  fail "status does not list the newest snapshot"
+printf '%s\n' "$status_text" | grep -q '^plain ' ||
+  fail "status does not report plain snapshots"
+status_json=$("$status_script" "$destination" --json)
+printf '%s\n' "$status_json" | grep -q '\"name\":\"snapshot-20260829T120260Z\"' ||
+  fail "status JSON does not list the newest snapshot"
+printf '%s\n' "$status_json" | grep -q '\"state\":\"complete\"' ||
+  fail "status JSON does not report complete snapshots"
+if set_mtime_days_ago "$dry_run_snapshot" 4; then
+  status_expired=$("$status_script" "$destination" --retention-days 1)
+  printf '%s\n' "$status_expired" | grep -q 'snapshot-20000102T000000Z (expired)' ||
+    fail "status does not mark expired snapshots"
+fi
+mkdir "$test_root/empty-status"
+expect_failure "$status_script" "$test_root/empty-status"
+expect_failure "$status_script" "$destination" --bogus-option
+expect_failure "$status_script" "$test_root/missing-status-directory"
+
+
 printf 'PASS: snapshots are complete, verified, restorable, encryptable and remotely publishable\n'

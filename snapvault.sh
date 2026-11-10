@@ -383,6 +383,12 @@ if test -n "$temporary_transport" && test -d "$temporary_transport"; then
 fi
 
 retention_days=${SNAPVAULT_RETENTION_DAYS:-}
+retention_dry_run=${SNAPVAULT_RETENTION_DRY_RUN:-}
+case "$retention_dry_run" in
+  ''|0) retention_dry_run=0 ;;
+  1) retention_dry_run=1 ;;
+  *) fail "SNAPVAULT_RETENTION_DRY_RUN must be 0 or 1" ;;
+esac
 if test -n "$retention_days" && test -n "$remote"; then
   printf 'snapvault: warning: SNAPVAULT_RETENTION_DAYS is ignored in remote mode; remote artifacts are never deleted\n' >&2
   retention_days=
@@ -414,6 +420,10 @@ if test -n "$retention_days"; then
       fail "unsafe retention name: $expired_snapshot"
     test -f "$expired_snapshot/COMPLETE" ||
       fail "retention candidate is not a complete snapshot"
+    if test "$retention_dry_run" = 1; then
+      printf 'snapvault: would delete %s\n' "$expired_snapshot" >&2
+      continue
+    fi
     rm -rf -- "$expired_snapshot"
   done <"$retention_listing"
   rm -f -- "$retention_listing"
