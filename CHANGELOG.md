@@ -4,6 +4,16 @@ All notable changes to snapvault are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] - 2026-11-12
+
+### Added
+
+- `snapvault-status.sh` lists the snapshots in a destination with their kind,
+  state, size and age. `--json` prints the same data for scripts, and
+  `--retention-days DAYS` marks the entries that retention would delete.
+- `SNAPVAULT_RETENTION_DRY_RUN=1` prints the retention candidates to standard
+  error without deleting them.
+
 ## [0.3.0] - 2026-10-19
 
 ### Added

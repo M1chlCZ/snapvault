@@ -108,6 +108,26 @@ or a plain `.tar.gz` artifact. An encrypted artifact requires
 To verify a snapshot that has no `COMPLETE` marker, add the
 `--allow-incomplete` option. The backup script uses this option internally.
 
+### Snapshot status
+
+`snapvault-status.sh` lists the snapshots in a destination. It reads names,
+sizes and metadata only; it hashes nothing:
+
+```sh
+./snapvault-status.sh /backups
+./snapvault-status.sh /backups --json
+./snapvault-status.sh /backups --retention-days 7
+```
+
+The text output has one row per entry with its kind (`plain`, `encrypted`,
+`transport` or `incomplete`), its state (`complete` or `incomplete`), its size
+in bytes, its age in days, and its name. With `--retention-days DAYS`, entries
+that retention would delete carry an `(expired)` marker. The `--json` output
+carries the same fields plus `destination`, `retentionDays`, and each entry's
+`expired` flag and `completedAt` value when it is known. The exit code is `0`
+when at least one entry exists, `1` when the destination has no snapshots, and
+`2` when the arguments or the destination are wrong.
+
 ### Restore a snapshot
 
 ```sh
@@ -254,6 +274,14 @@ SNAPVAULT_RETENTION_DAYS=14 ./snapvault.sh
 Retention works on plain snapshot directories in the local destination only.
 See [Retention semantics](#retention-semantics).
 
+Set `SNAPVAULT_RETENTION_DRY_RUN=1` to print the candidates that retention
+would delete without deleting them. The candidates go to standard error, so
+standard output still reports the new snapshot path:
+
+```sh
+SNAPVAULT_RETENTION_DAYS=14 SNAPVAULT_RETENTION_DRY_RUN=1 ./snapvault.sh
+```
+
 ### Cron
 
 Put the environment variables into a small wrapper script. Then call the
@@ -312,6 +340,7 @@ are inside the destination. Their names start with a dot:
 | `SNAPVAULT_PG_RESTORE_BIN` | no | `pg_restore` | Path or name of the `pg_restore` binary. |
 | `SNAPVAULT_TIMESTAMP` | no | current UTC time | Snapshot timestamp in `YYYYMMDDTHHMMSSZ` form. |
 | `SNAPVAULT_RETENTION_DAYS` | no | unset (keep all) | Delete complete snapshots older than this number of days. Local plain directories only. |
+| `SNAPVAULT_RETENTION_DRY_RUN` | no | unset | `1` prints the retention candidates to standard error without deleting them. |
 | `SNAPVAULT_TAR_BIN` | no | `tar` | Path or name of the `tar` binary. |
 | `SNAPVAULT_SHA256SUM_BIN` | no | auto-detected | Path or name of the SHA-256 tool. |
 | `SNAPVAULT_AGE_RECIPIENT` | no | unset | One age public key (`age1...`). Enables encryption. |
@@ -390,6 +419,9 @@ Retention covers plain snapshot directories only:
 | `snapvault-restore.sh` | 0 | The media and the requested database restore completed. |
 | `snapvault-restore.sh` | 1 | A validation error occurred, including a failed snapshot verification. |
 | `snapvault-restore.sh` | other | A tool failed. The exit code comes from that tool, for example `tar`, `age` or `pg_restore`. |
+| `snapvault-status.sh` | 0 | At least one snapshot entry exists. |
+| `snapvault-status.sh` | 1 | The destination has no snapshot entries. |
+| `snapvault-status.sh` | 2 | The arguments or the destination are wrong. |
 
 ## Limitations
 
