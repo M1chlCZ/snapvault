@@ -130,6 +130,28 @@ carries the same fields plus `destination`, `retentionDays`, and each entry's
 when at least one entry exists, `1` when the destination has no snapshots, and
 `2` when the arguments or the destination are wrong.
 
+Two flags turn the report into a monitoring check:
+
+- `--max-age-days DAYS` fails when the newest complete snapshot is older than
+  `DAYS` whole days, or when no complete snapshot exists.
+- `--require-complete` fails when a plain snapshot directory has no `COMPLETE`
+  marker.
+
+```sh
+./snapvault-status.sh /backups --max-age-days 2 --require-complete --json
+```
+
+Findings print to standard error after the table in text mode. The JSON output
+gains `maxAgeDays`, `requireComplete`, `healthy` and `problems`. A backup one
+day and 23 hours old reports `ageDays: 1`, so compare the limit with whole
+days. A cron check can rely on the exit code:
+
+```sh
+0 3 * * * /opt/snapvault/snapvault-status.sh /backups \
+  --max-age-days 2 --require-complete --json >>/var/log/snapvault.jsonl ||
+  /usr/local/bin/alert
+```
+
 ### Restore a snapshot
 
 ```sh
@@ -420,8 +442,8 @@ Retention covers plain snapshot directories only:
 | `snapvault-restore.sh` | 0 | The media and the requested database restore completed. |
 | `snapvault-restore.sh` | 1 | A validation error occurred, including a failed snapshot verification. |
 | `snapvault-restore.sh` | other | A tool failed. The exit code comes from that tool, for example `tar`, `age` or `pg_restore`. |
-| `snapvault-status.sh` | 0 | At least one snapshot entry exists. |
-| `snapvault-status.sh` | 1 | The destination has no snapshot entries. |
+| `snapvault-status.sh` | 0 | The report is healthy: at least one entry exists and no monitoring check failed. |
+| `snapvault-status.sh` | 1 | The destination has no entries, or `--max-age-days` or `--require-complete` found a problem. |
 | `snapvault-status.sh` | 2 | The arguments or the destination are wrong. |
 
 ## Limitations

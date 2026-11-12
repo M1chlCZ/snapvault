@@ -21,6 +21,15 @@ expect_failure() {
   fi
 }
 
+expect_exit() {
+  local want=$1
+  shift
+  local code=0
+  "$@" >/dev/null 2>&1 || code=$?
+  test "$code" -eq "$want" ||
+    fail "expected exit $want, got $code: $*"
+}
+
 assert_file() {
   test -f "$1" || fail "missing file: $1"
 }
@@ -795,5 +804,36 @@ status_zero=$("$status_script" "$destination" --retention-days 01 --json)
 printf '%s\n' "$status_zero" | grep -q '"retentionDays":1' ||
   fail "status JSON keeps a leading zero in retentionDays"
 
+mkdir "$test_root/status-age"
+mkdir "$test_root/status-age/snapshot-20260101T000000Z"
+touch "$test_root/status-age/snapshot-20260101T000000Z/COMPLETE"
+if set_mtime_days_ago "$test_root/status-age/snapshot-20260101T000000Z" 4; then
+  expect_exit 1 "$status_script" "$test_root/status-age" --max-age-days 1
+  expect_exit 0 "$status_script" "$test_root/status-age" --max-age-days 7
+  status_age_json=$(
+    "$status_script" "$test_root/status-age" --max-age-days 1 --json || true
+  )
+  printf '%s\n' "$status_age_json" | grep -q '"healthy":false' ||
+    fail "status JSON does not report a stale backup as unhealthy"
+  printf '%s\n' "$status_age_json" | grep -q '"maxAgeDays":1' ||
+    fail "status JSON does not echo maxAgeDays"
+fi
+
+mkdir "$test_root/status-incomplete"
+mkdir "$test_root/status-incomplete/snapshot-20260101T000000Z"
+expect_exit 0 "$status_script" "$test_root/status-incomplete"
+expect_exit 1 "$status_script" "$test_root/status-incomplete" --require-complete
+status_incomplete_json=$(
+  "$status_script" "$test_root/status-incomplete" --require-complete --json ||
+    true
+)
+printf '%s\n' "$status_incomplete_json" | grep -q '"requireComplete":true' ||
+  fail "status JSON does not echo requireComplete"
+printf '%s\n' "$status_incomplete_json" | grep -q '"problems":\["' ||
+  fail "status JSON does not list problems"
+
+mkdir "$test_root/status-empty-age"
+expect_exit 1 "$status_script" "$test_root/status-empty-age" --max-age-days 1
+expect_exit 2 "$status_script" "$destination" --max-age-days nope
 
 printf 'PASS: snapshots are complete, verified, restorable, encryptable and remotely publishable\n'

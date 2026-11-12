@@ -13,6 +13,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--retention-days DAYS` marks the entries that retention would delete.
 - `SNAPVAULT_RETENTION_DRY_RUN=1` prints the retention candidates to standard
   error without deleting them.
+- `snapvault-status.sh --max-age-days DAYS` and `--require-complete` turn the
+  report into a monitoring check. Findings exit with status 1; usage and I/O
+  errors keep status 2.
+- The `--json` report gains `maxAgeDays`, `requireComplete`, `healthy` and
+  `problems`.
 
 ## [0.3.0] - 2026-10-19
 
