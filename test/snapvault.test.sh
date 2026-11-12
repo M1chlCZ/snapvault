@@ -773,4 +773,27 @@ expect_failure "$status_script" "$destination" --bogus-option
 expect_failure "$status_script" "$test_root/missing-status-directory"
 
 
+mkdir "$test_root/status-staging"
+touch "$test_root/status-staging/.snapshot-20260101T000000Z.tar.gz.age.incomplete"
+mkdir "$test_root/status-staging/.snapshot-20260101T000000Z.transport.abcd"
+status_staging=$("$status_script" "$test_root/status-staging")
+printf '%s\n' "$status_staging" | grep -q '\.snapshot-20260101T000000Z.tar.gz.age.incomplete' ||
+  fail "status does not list a remote staging file"
+printf '%s\n' "$status_staging" | grep -Eq '^transport +incomplete' ||
+  fail "status does not report transport staging as incomplete"
+
+mkdir "$test_root/status-artifacts"
+touch "$test_root/status-artifacts/snapshot-20260101T000000Z.tar.gz.age"
+if set_mtime_days_ago "$test_root/status-artifacts/snapshot-20260101T000000Z.tar.gz.age" 4; then
+  status_artifacts=$("$status_script" "$test_root/status-artifacts" --retention-days 1)
+  if printf '%s\n' "$status_artifacts" | grep -q '(expired)'; then
+    fail "status marked a non-retention artifact as expired"
+  fi
+fi
+
+status_zero=$("$status_script" "$destination" --retention-days 01 --json)
+printf '%s\n' "$status_zero" | grep -q '"retentionDays":1' ||
+  fail "status JSON keeps a leading zero in retentionDays"
+
+
 printf 'PASS: snapshots are complete, verified, restorable, encryptable and remotely publishable\n'

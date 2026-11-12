@@ -54,6 +54,7 @@ test -d "$destination" || fail "destination is not a directory: $destination"
 if test -n "$retention_days"; then
   [[ "$retention_days" =~ ^[0-9]{1,5}$ ]] ||
     fail "--retention-days must be a non-negative integer"
+  retention_days=$((10#$retention_days))
 fi
 destination=$(CDPATH= cd -- "$destination" && pwd -P)
 
@@ -61,6 +62,9 @@ json_escape() {
   local value=$1
   value=${value//\\/\\\\}
   value=${value//\"/\\\"}
+  value=${value//$'\t'/\\t}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
   printf '%s' "$value"
 }
 
@@ -108,13 +112,17 @@ while IFS= read -r -d '' path; do
   kind=
   state=
   case "$name" in
+    .*.tar.gz.incomplete | .*.tar.gz.age.incomplete)
+      kind=incomplete
+      state=incomplete
+      ;;
     .*".incomplete."*)
       kind=incomplete
       state=incomplete
       ;;
     .*".transport."*)
-      kind=incomplete
-      state=transport
+      kind=transport
+      state=incomplete
       ;;
     *)
       if test -d "$path"; then
@@ -156,7 +164,10 @@ while IFS= read -r -d '' path; do
   age_days=$((age_seconds / 86400))
   size=$(path_size_bytes "$path")
   expired=false
-  if test -n "$retention_days" && test "$age_days" -gt "$retention_days"; then
+  if test -n "$retention_days" &&
+    test "$kind" = plain &&
+    test "$state" = complete &&
+    test "$age_days" -gt "$retention_days"; then
     expired=true
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
